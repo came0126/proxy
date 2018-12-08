@@ -24,7 +24,7 @@ int parse(int cfd);
 // int send_request(int sfd, struct node *head);
 
 /* You won't lose style points for including this long line in your code */
-static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:56.0) Gecko/20100101 Firefox/56.0r\n";
+static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:56.0) Gecko/20100101 Firefox/56.0\r\n";
 
 int main(int argc, char **argv) {
 	signal(SIGPIPE, SIG_IGN);
@@ -79,8 +79,7 @@ int parse(int cfd) {
 	rio_t rp;
 	Rio_readinitb(&rp, cfd);
 	Rio_readlineb(&rp, line, MAXLINE);
-	printf("Request Headers: \n%s\n", line);
-
+	printf("\nRequest:\n");
 	// Parse the request
 	sscanf(line, "%s %s %s", req_type, uri, http);
 	if(sscanf(uri, "http://%s", nohttp) != 1)
@@ -95,7 +94,7 @@ int parse(int cfd) {
 		printf("ONLY GET is supported\n");
 		exit(2);
 	}
-
+	
 	// Open the server connection
 	int sfd = open_clientfd(host, port);
 	if(sfd < 0) {
@@ -103,8 +102,17 @@ int parse(int cfd) {
 		exit(2);
 	}
 
-	Rio_readlineb(&rp, line, MAXLINE);
+	// Forward request header to server
+	char parsed_line[MAXLINE];
+	sprintf(parsed_line, "%s %s HTTP/1.0\r\n", req_type, path);
+	printf("%s", parsed_line);
+	if(rio_writen(sfd, parsed_line, strlen(parsed_line)) < 0) {
+		perror("cannot write request header to server");
+		exit(2);
+	}
+
 	// Read and send the request headers
+	Rio_readlineb(&rp, line, MAXLINE);
 	while(strcmp("\r\n", line)) {
 		// Special line cases
 		char tmp[MAXLINE], tmp2[MAXLINE];
@@ -126,46 +134,48 @@ int parse(int cfd) {
 			exit(2);
 		}
 
-		// Read the next line
 		Rio_readlineb(&rp, line, MAXLINE);
 	}
-
-	if(rio_writen(sfd, line, strlen(line)) < 0) {
-			perror("Error with sending the request header\n");
-			exit(2);
-	}
+        if(rio_writen(sfd, line, strlen(line)) < 0) {
+        	perror("Error with sending the request header\n");
+                exit(2);
+        }	
 
 	/** NEED TO RECEIVE HEADERS FROM SERVER **/
+	printf("Response:\n");
+	// Receive response from server
 	Rio_readinitb(&rp, sfd);
-	while(1) {
-		Rio_readlineb(&rp, line, MAXLINE);
-		printf("\n%s\r\n", line);
+	while(1) {		
+		if((rio_readlineb(&rp, line, MAXLINE)) < 0) {
+                        perror("Error writing response header to client");
+                        exit(2);
+                }
 
-		if(strcmp(line, "\r\n")) {
-			printf("stop reading from server responses");
-			break;
+		printf("%s", line);
+
+		if(rio_writen(cfd, line, strlen(line)) < 0) {
+			perror("Error writing response header to client");
+                	exit(2);
 		}
-
-		// // Special line cases
-		// char tmp[MAXLINE], tmp2[MAXLINE];
-		// sscanf(line, "%s:%s", tmp, tmp2);
-		// if(!strcmp(tmp, "Proxy-Connection:") || !strcmp(tmp, "Connection"))
-		// 	sprintf(line, "%s: close\r\n", tmp);
-		// else if(!strcmp(tmp, "User-Agent:"))
-		// 	sprintf(line, "%s: %s\r\n", tmp, user_agent_hdr);
-
-		// // Send header lines one by one t0
-		// if(rio_writen(sfd, line, strlen(line)) < 0) {
-		// 	perror("Error with send\n");
-		// 	exit(2);
-		// }
+		if(strcmp(line, "\r\n"))
+                        break;
 	}
 
+	// Receive content from server
+	char content[MAX_OBJECT_SIZE];
+	int line_size = 0;
+	int cont_size = 0;
+	while((line_size = rio_readnb(&rp, line, MAX_OBJECT_SIZE)) != 0) {
+		memcpy(content + cont_size, line, line_size * sizeof(char));
+		cont_size += line_size;
+	}
 
-		
+        if(rio_writen(cfd, content, cont_size) < 0) {
+                perror("Error writing response content to client");
+                exit(2);
+        }       
+
 	return sfd;
-
-
 }
 
 // char *get_node(char key[], struct node *head) {
