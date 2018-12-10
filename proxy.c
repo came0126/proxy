@@ -11,28 +11,18 @@
 #define MAX_OBJECT_SIZE 102400
 #define BACKLOG 25
 
-// struct node {
-// 	struct node *next;
-// 	char key[50];
-// 	char val[MAXLINE];
-// };
-
-int parse(int cfd);
-// char *get_node(char key[], struct node *head);
-// void add_node(char key[], char val[], struct node *head);
-// void free_list(struct node *node);
-// int send_request(int sfd, struct node *head);
+void parse(int cfd);
+int foward_request(rio_t *rp);
+int foward_response(rio_t *rp, int cfd);
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:56.0) Gecko/20100101 Firefox/56.0\r\n";
+static const char *prox_conn = "Proxy-Connection: close\r\n";
+static const char *conn = "Connection: close\r\n";
 
 int main(int argc, char **argv) {
-	signal(SIGPIPE, SIG_IGN);
-
-	int cfd;
-	char buf[MAXLINE], *port;
-	struct sockaddr_in client_addr;
-
+	char *port;
+	
 	// Validate port number
 	if(argc != 2) {
 		printf("Needs a port number\n");
@@ -41,205 +31,194 @@ int main(int argc, char **argv) {
 
 	port = argv[1];
 
+	// Proxy file descriptor
 	int fd = open_listenfd(port);
 	if(fd < 0) {
-		perror("Error in open_listenfd\n");
+		perror("Not a valid port number\n");
 		exit(2);
 	}
 
-	printf("Listening for a request\n");
+	Signal(SIGPIPE, SIG_IGN);
+
+	// Accept connections
+	socklen_t client_len;
+	struct sockaddr_in client_addr;
+	int cfd;
+	while(1) {
+		client_len = sizeof(client_addr);
+		printf("Listening for a connection\n");
+		cfd = accept(fd, (struct sockaddr *) &client_addr, &client_len);
+		parse(cfd);
+		close(cfd);
+		printf("Transaction completed!\n");
+	}
 	
-
-	// Accept connection
-	socklen_t client_len = sizeof(client_addr);
-	cfd = accept(fd, (struct sockaddr *) &client_addr, &client_len);
-	if(cfd < 0) {
-		perror("Error accepting connection\n");
-		exit(2);
-	}
-
-	printf("Accepted a Connection\n");
-
-
-
-	//struct node *head = malloc(sizeof(struct node));
-	int sfd = parse(cfd);
-
-	// Lines added to header linked list. Now send the request to the server
-	close(sfd);
-	close(cfd);
 	close(fd);
 	return 0;
 }
 
-/** Parse the request from the client, and return the server's fd supporting only GET commands **/
-int parse(int cfd) {
-	char uri[MAXLINE], req_type[MAXLINE], http[MAXLINE], path[MAXLINE], leftover[MAXLINE], host[MAXLINE], nohttp[MAXLINE], port[5], line[MAXLINE];
+// Parse the request from the client
+void parse(int cfd) {
+	printf("\n");
+	// Precondition
+	if(cfd < 0) {
+		perror("Error accepting connection from client\n");
+		return;
+	}
 
 	rio_t rp;
-	Rio_readinitb(&rp, cfd);
-	Rio_readlineb(&rp, line, MAXLINE);
-	printf("\nRequest:\n");
-	// Parse the request
-	sscanf(line, "%s %s %s", req_type, uri, http);
-	if(sscanf(uri, "http://%s", nohttp) != 1)
-		sscanf(uri, "%s", nohttp);
-	sscanf(nohttp, "%[^/]%s", leftover, path);
-	if(sscanf(leftover, "%[^:]:%s", host, port) == 1) {
-		port[0] = '8';
-		port[1] = '0';
+	// Handle requests from client
+	int sfd;
+	rio_readinitb(&rp, cfd);
+	if((sfd = foward_request(&rp)) < 0)
+		return;
+	
+	// Handle response from server
+	rio_readinitb(&rp, sfd);
+	if(foward_response(&rp, cfd) < 0)
+		return;
+
+	close(sfd);
+	return;
+}
+
+// Foward the request data from client's rio_t to the server (sfd), which is returned
+int foward_request(rio_t *rp) {
+	char uri[MAXLINE], req_type[MAXLINE], http[MAXLINE], leftover[MAXLINE], nohttp[MAXLINE], line[MAXLINE], path[MAXLINE],
+		port[MAXLINE], host[MAXLINE], request[MAX_OBJECT_SIZE];
+
+	if(rio_readlineb(rp, line, MAXLINE) < 0){
+		perror("error reading request line in parse_request");
+		return -1;
 	}
 
+	// Parse the request
+	sscanf(line, "%s %s %s", req_type, uri, http);
+
 	if(strcmp(req_type, "GET") != 0) {
-		printf("ONLY GET is supported\n");
-		exit(2);
+		perror("only GET is supported\n");
+		return -1;
+	}
+
+	// Loop only executes once, it eliminates need for GOTO. 
+	// localhost case
+	if(uri[0] == '/') {
+		// Set default port, might be changed later
+		strcpy(port, "80");
+		strcpy(path, uri);
 	}
 	
+	else {
+		if(sscanf(uri, "http://%s", nohttp) != 1)
+			sscanf(uri, "%s", nohttp);
+		sscanf(nohttp, "%[^/]%s", leftover, path);
+		if(sscanf(leftover, "%[^:]:%s", host, port) == 1) {
+			port[0] = '8';
+			port[1] = '0';
+		}
+	}
+	
+	strcpy(request, "");
+	sprintf(request, "%s %s HTTP/1.0\r\n", req_type, path);
+
+	// Host is not defined, so read headers to obtain the host.
+	// Read request headers
+	int flag = 0;
+	while(strcmp(line, "\r\n")) {
+		if(rio_readlineb(rp, line, MAXLINE) < 0) {
+			perror("error reading a request line from client");
+			return -1;
+		}
+		if(!strcmp(line, "\r\n"))
+			break;
+		// If the request contains a custom host, then set our host flag
+		if(strstr(line, "Host:")) {
+			if(strstr(line, "Host: localhost")) {
+				sscanf(line, "Host: localhost:%s", port);
+				strcpy(host, "localhost");
+			}
+			
+			flag = 1;
+		}
+		// If the line is not a custom header
+		if(!strstr(line, "User-Agent:") && !strstr(line, "Proxy-Connection:") && !strstr(line, "Connection:"))
+			strcat(request, line);
+	}
+
+	// Client did not send a custom host, so use default
+	if(!flag) {
+		sprintf(line, "Host: %s\r\n", host);
+		strcat(request, line);
+	}
+
+	// Add the custom headers
+	strcat(request, user_agent_hdr);
+	strcat(request, prox_conn);
+	strcat(request, conn);
+	strcat(request, "\r\n");
+
+	printf("host: %s\n", host);
+	printf("port: %s\n", port);
+	printf("path: %s\n", path);
+
+
+	printf("%s", request);
+
 	// Open the server connection
 	int sfd = open_clientfd(host, port);
 	if(sfd < 0) {
-		perror("Error with open_clientfd\n");
-		exit(2);
+		perror("error opening up connection to server\n");
+		return -1;
 	}
 
-	// Forward request header to server
-	char parsed_line[MAXLINE];
-	sprintf(parsed_line, "%s %s HTTP/1.0\r\n", req_type, path);
-	printf("%s", parsed_line);
-	if(rio_writen(sfd, parsed_line, strlen(parsed_line)) < 0) {
-		perror("cannot write request header to server");
-		exit(2);
+	printf("server connected\n");
+
+	if(rio_writen(sfd, request, strlen(request)) < 0){
+		perror("error sending the header to server");
+		return -1;
 	}
-
-	// Read and send the request headers
-	Rio_readlineb(&rp, line, MAXLINE);
-	while(strcmp("\r\n", line)) {
-		// Special line cases
-		char tmp[MAXLINE], tmp2[MAXLINE];
-		char *str_prox = "Proxy-Connection: close\r\n";
-		char *str_conn = "Connection: close\r\n";
-		sscanf(line, "%s: %s", tmp, tmp2);
-		if(!strcmp(tmp, "Proxy-Connection:"))
-			sprintf(line, "%s", str_prox);
-		else if(!strcmp(tmp, "Connection"))
-			sprintf(line, "%s", str_conn);
-		else if(!strcmp(tmp, "User-Agent:"))
-			sprintf(line, "%s", user_agent_hdr);
-
-		printf("%s", line);
-
-		// Send header lines one by one
-		if(rio_writen(sfd, line, strlen(line)) < 0) {
-			perror("Error with sending the request header\n");
-			exit(2);
-		}
-
-		Rio_readlineb(&rp, line, MAXLINE);
-	}
-        if(rio_writen(sfd, line, strlen(line)) < 0) {
-        	perror("Error with sending the request header\n");
-                exit(2);
-        }	
-
-	/** NEED TO RECEIVE HEADERS FROM SERVER **/
-	printf("Response:\n");
-	// Receive response from server
-	Rio_readinitb(&rp, sfd);
-	while(1) {		
-		if((rio_readlineb(&rp, line, MAXLINE)) < 0) {
-                        perror("Error writing response header to client");
-                        exit(2);
-                }
-
-		printf("%s", line);
-
-		if(rio_writen(cfd, line, strlen(line)) < 0) {
-			perror("Error writing response header to client");
-                	exit(2);
-		}
-		if(strcmp(line, "\r\n"))
-                        break;
-	}
-
-	// Receive content from server
-	char content[MAX_OBJECT_SIZE];
-	int line_size = 0;
-	int cont_size = 0;
-	while((line_size = rio_readnb(&rp, line, MAX_OBJECT_SIZE)) != 0) {
-		memcpy(content + cont_size, line, line_size * sizeof(char));
-		cont_size += line_size;
-	}
-
-        if(rio_writen(cfd, content, cont_size) < 0) {
-                perror("Error writing response content to client");
-                exit(2);
-        }       
-
+	printf("Request forwarded\n");
 	return sfd;
 }
 
-// char *get_node(char key[], struct node *head) {
-// 	if(strcmp(head->key, key))
-// 		return head->val;
+// Foward the response data from rp (a server) to cfd (the client)
+int foward_response(rio_t *rp, int cfd) {
+	char line[MAXLINE], response[MAXLINE], content_line[MAX_OBJECT_SIZE], content[MAX_OBJECT_SIZE * 10];
 
-// 	struct node *next = head->next;
-// 	while(next != NULL) {
-// 		if(strcmp(next->key, key))
-// 			return head->val;
-// 		next = next->next;
-// 	}
+	strcpy(response, "");
 
-// 	return NULL;
-// }
+	// Recieve response header from server
+	int line_size = 0, response_size = 0, content_size = 0;
+	while((line_size = rio_readlineb(rp, line, MAXLINE)) != 0) {
+		strcat(response, line);
+		response_size += line_size;
 
-// // Add a node to the linkedlist, assumed that head is not null
-// void add_node(char key[], char val[], struct node *head) {
-// 	if(head->next == NULL) {
-// 		strcpy(head->val, val);
-// 		strcpy(head->key, key);
-// 		return;
-// 	}
-// 	struct node *next = head->next;
-// 	struct node *curr = head;
-// 	while(next != NULL) {
-// 		if(strcmp(curr->key, key))
-// 			return;
-// 		next = next->next;
-// 	}
+		// Additional loop guard, after the line was added
+		if(!strcmp(line, "\r\n"))
+			break;
+	}
 
-// 	curr->next = malloc(sizeof(struct node));
-// 	strcpy(curr->next->val, val);
-// 	strcpy(curr->next->key, key);
-// 	return;
-// }
+	// Write reponse header to client
+	if(rio_writen(cfd, response, response_size) < 0) {
+		perror("error writing response header to client");
+		return -1;
+	}
 
-// void free_list(struct node *node) {
-// 	if(node == NULL)
-// 		return;
-// 	free_list(node->next);
-// 	free(node->val);
-// 	free(node->key);
-// 	free(node);
-// 	return;
-// }
+	strcpy(content, "");
 
-// /** Send a request header to the server fd */
-// int send_request(int sfd, struct node *head) {
-// 	//sprintf(header, "GET %s HTTP/1.0\r\nHost: %s\r\n%s\r\nConnection: close\r\nProxy-Connection: close\r\n\r\n", path, host, user_agent_hdr);
+	// Receive content from server
+	// Need to use a different method of obtaining the content because it may be binary
+	while((line_size = rio_readnb(rp, content_line, MAX_OBJECT_SIZE)) != 0) {
+		memcpy(content + content_size, content_line, line_size);
+		content_size += line_size;
+	}
 
-// 	struct node *next = head;
-// 	char line[MAXLINE];
-// 	while(next != NULL) {
-// 		sprintf(line, "%s: %s", next->key, next->val);
-// 		printf("printtttting lineee%s\n", line);
-// 		// Send the header to the server
-// 		if(rio_writen(sfd, line, strlen(line)) < 0) {
-// 			perror("Error with send\n");
-// 			exit(2);
-// 		}
-// 		next = next->next;
-// 	}
+	// Write reponse content to client
+	if(rio_writen(cfd, content, content_size) < 0) {
+		perror("error writing response content to client");
+		return -1;
+	}
 
-// 	close(sfd);
-// 	return 0;
-// }
+	printf("Response forwarded\n");
+	return 0;
+}
