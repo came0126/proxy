@@ -1,19 +1,29 @@
+/**
+Christian Cameron 
+	Proxy Lab (lab6)
+**/
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include "csapp.h"
+#include "cacher.h"
 
 /* Recommended max cache and object sizes */
-#define MAX_CACHE_SIZE 1049000
-#define MAX_OBJECT_SIZE 102400
-#define BACKLOG 25
+// #define MAX_CACHE_SIZE 1049000
+// #define MAX_OBJECT_SIZE 102400
 
+void *main_thread(void *varg);
 void parse(int cfd);
-int foward_request(rio_t *rp);
-int foward_response(rio_t *rp, int cfd);
+int foward_request(rio_t *rp, char *nohttp_url);
+int foward_response(rio_t *rp, int cfd, char *nohttp_url);
+int write_cache(int cfd, char *uri);
+char *uri_to_fd(char *uri);
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:56.0) Gecko/20100101 Firefox/56.0\r\n";
@@ -22,6 +32,7 @@ static const char *conn = "Connection: close\r\n";
 
 int main(int argc, char **argv) {
 	char *port;
+	cache_init();
 	
 	// Validate port number
 	if(argc != 2) {
@@ -42,40 +53,54 @@ int main(int argc, char **argv) {
 
 	// Accept connections
 	socklen_t client_len;
-	struct sockaddr_in client_addr;
-	int cfd;
+	struct sockaddr_in *client_addr;
+	int *cfd;
+	pthread_t tid;
 	while(1) {
-		client_len = sizeof(client_addr);
 		printf("Listening for a connection\n");
-		cfd = accept(fd, (struct sockaddr *) &client_addr, &client_len);
-		parse(cfd);
-		close(cfd);
+		cfd = malloc(sizeof(int));
+		*cfd = accept(fd, (struct sockaddr *) &client_addr, &client_len);
+		pthread_create(&tid, NULL, main_thread, cfd);
 		printf("Transaction completed!\n");
 	}
 	
 	close(fd);
+	cache_destroy();
 	return 0;
 }
 
-// Parse the request from the client
+// The main thread function that sets up the thread. varg is of type conn_info
+void *main_thread(void *varg) {
+	int cfd = *((int *) varg);
+	// Preventing memory leaks
+	pthread_detach(pthread_self());
+	free(varg);
+	// Parse and forward the requests
+	parse(cfd);
+	close(cfd);
+	return NULL;
+}
+
+// Parse the request from cfd the client's fd
 void parse(int cfd) {
 	printf("\n");
 	// Precondition
 	if(cfd < 0) {
-		perror("Error accepting connection from client\n");
+		perror("error accepting connection from client\n");
 		return;
 	}
 
 	rio_t rp;
 	// Handle requests from client
 	int sfd;
+	char nohttp_url[MAXLINE];
 	rio_readinitb(&rp, cfd);
-	if((sfd = foward_request(&rp)) < 0)
+	if((sfd = foward_request(&rp, nohttp_url)) < 0)
 		return;
 	
 	// Handle response from server
 	rio_readinitb(&rp, sfd);
-	if(foward_response(&rp, cfd) < 0)
+	if(foward_response(&rp, cfd, nohttp_url) < 0)
 		return;
 
 	close(sfd);
@@ -83,7 +108,8 @@ void parse(int cfd) {
 }
 
 // Foward the request data from client's rio_t to the server (sfd), which is returned
-int foward_request(rio_t *rp) {
+// Additionally it updates nohttp_url with the proper url
+int foward_request(rio_t *rp, char *nohttp_url) {
 	char uri[MAXLINE], req_type[MAXLINE], http[MAXLINE], leftover[MAXLINE], nohttp[MAXLINE], line[MAXLINE], path[MAXLINE],
 		port[MAXLINE], host[MAXLINE], request[MAX_OBJECT_SIZE];
 
@@ -117,8 +143,33 @@ int foward_request(rio_t *rp) {
 			port[1] = '0';
 		}
 	}
+
+	// Localhost pre-read check
+	if(strstr(leftover, "localhost") != 0) {
+		char tmp[MAXLINE] = "localhost";
+		strcat(tmp, path);
+		strcpy(nohttp_url, tmp);
+	}
+
+	else
+		strcpy(nohttp_url, leftover);
+
+	// Send content to client if it has been cached, or keep going
+	struct node *node = cache_find(nohttp_url);
+	// Request is already cached, so return and write
+	if(node != NULL) {
+		char *buf = node->content;
+		if(rio_writen(rp->rio_fd, buf, node->content_size) < 0){
+			perror("error sending cached contents to client");
+			return -1;
+		}
+		printf("Successfully sent cached contents to client!\n");
+		return 0;
+	}
 	
+	// Erase the request string
 	strcpy(request, "");
+	// Save request line
 	sprintf(request, "%s %s HTTP/1.0\r\n", req_type, path);
 
 	// Host is not defined, so read headers to obtain the host.
@@ -160,8 +211,6 @@ int foward_request(rio_t *rp) {
 	printf("host: %s\n", host);
 	printf("port: %s\n", port);
 	printf("path: %s\n", path);
-
-
 	printf("%s", request);
 
 	// Open the server connection
@@ -173,6 +222,7 @@ int foward_request(rio_t *rp) {
 
 	printf("server connected\n");
 
+	// Forward the request to the server
 	if(rio_writen(sfd, request, strlen(request)) < 0){
 		perror("error sending the header to server");
 		return -1;
@@ -182,7 +232,7 @@ int foward_request(rio_t *rp) {
 }
 
 // Foward the response data from rp (a server) to cfd (the client)
-int foward_response(rio_t *rp, int cfd) {
+int foward_response(rio_t *rp, int cfd, char *nohttp_url) {
 	char line[MAXLINE], response[MAXLINE], content_line[MAX_OBJECT_SIZE], content[MAX_OBJECT_SIZE * 10];
 
 	strcpy(response, "");
@@ -215,10 +265,62 @@ int foward_response(rio_t *rp, int cfd) {
 
 	// Write reponse content to client
 	if(rio_writen(cfd, content, content_size) < 0) {
-		perror("error writing response content to client");
+		perror("error writing response content to client\n");
 		return -1;
 	}
 
 	printf("Response forwarded\n");
+	printf("Caching data...\n");
+
+	cache_add(content, content_size, nohttp_url);
+
+	printf("Caching completed!\n");
 	return 0;
 }
+
+// If url is cached, write the contents to client then return > 0
+// If a request from server is needed then return 0, on write error return -1.
+int write_cache(int cfd, char *uri) {
+	// rio_t cache;
+	// int fd = open(uri, O_RDONLY, 0777);
+	// rio_readinitb(&cache, int fd); 
+
+	// // Site wasnt cached, so let caller move forward with requesting from the server.
+	// if(cache_fd == NULL) {
+	// 	perror("Cache miss... \n");
+	// 	close(fd);
+	// 	return 0;
+	// }
+
+	// printf("\n\n\n***i got catched\n\n\n");
+	// char buf[MAX_CACHE_SIZE];
+	// // Read the file
+	// int buf_size = rio_readnb(&cache, buf, MAX_CACHE_SIZE); 
+	// if(buf_size < 0) {
+	// 	perror("IO Error when caching, trying server...\n");
+	// 	close(fd);
+	// 	return 0;
+	// }
+
+	// close(fd);
+
+	// // Send buffer to client
+	// if(rio_writen(cfd, buf, buf_size) < 0) {
+	// 	perror("error writing content from cache to client\n");
+	// 	return -1;
+	// }
+
+	// return 1; // Success!
+	return 0;
+}
+
+// // Simple function to convert uri to a valid file name
+// char *uri_to_fd(char *uri) {
+// 	int i;
+// 	for(i = 0; uri[i] != '\0'; i++) {
+// 		if(uri[i] == '/')
+// 			uri[i] = '_';
+// 	}
+
+// 	return uri;
+// }
