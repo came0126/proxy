@@ -6,9 +6,11 @@
 /* linked list node */
 struct node {
 	char uri[MAXLINE];
-    char content[MAX_OBJECT_SIZE];
+    char content[MAX_CACHE_SIZE];
 	int content_size;
 	int time;
+	// Flag for if a node has been cached
+	int cached;
 };
 
 int cache_find(char *uri);

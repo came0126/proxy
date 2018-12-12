@@ -32,6 +32,7 @@ static const char *conn = "Connection: close\r\n";
 
 int main(int argc, char **argv) {
 	char *port;
+	pthread_mutex_init(&mutex, NULL);
 	cache_init();
 	
 	// Validate port number
@@ -66,6 +67,7 @@ int main(int argc, char **argv) {
 	
 	close(fd);
 	cache_destroy();
+	pthread_mutex_destroy(&mutex);
 	return 0;
 }
 
@@ -99,6 +101,8 @@ void parse(int cfd) {
 	rio_readinitb(&rp, cfd);
 	if((sfd = foward_request(&rp, nohttp_url)) < 0)
 		return;
+
+	printf("we made it boss\n");
 	
 	// Handle response from server
 	rio_readinitb(&rp, sfd);
@@ -159,16 +163,14 @@ int foward_request(rio_t *rp, char *nohttp_url) {
 	int i = cache_find(nohttp_url);
 	// Request is already cached, so return and write
 	if(i >= 0) {
-		// Request from server if index is null
-		if(list[i] != NULL) {
-			char *buf = list[i]->content;
-			if(rio_writen(rp->rio_fd, buf, list[i]->content_size) < 0) {
-				perror("error sending cached contents to client");
-				return -1;
-			}
-			printf("Successfully sent cached contents to client!\n");
-			return 0;
+		char *buf = list[i]->content;
+		printf("buf: %s\n", buf);
+		if(rio_writen(rp->rio_fd, buf, list[i]->content_size) < 0) {
+			perror("error sending cached contents to client");
+			return -1;
 		}
+		printf("Successfully sent cached contents to client!\n");
+		return 0;
 	}
 	
 	// Erase the request string

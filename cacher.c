@@ -1,7 +1,12 @@
 #include "cacher.h"
 
 void cache_init() {
-	*list = malloc(5*sizeof(struct node));
+	int i;
+	for(i = 0; i < 5; i++) {
+		list[i] = malloc(sizeof(struct node));
+		list[i]->cached = 0;
+	}
+	
 	total_size = 0;
 	global_time = 0;
 }
@@ -9,10 +14,9 @@ void cache_init() {
 // Returns the index in the list of cache objects of the requests uri
 //	-1 if the site has not been cached yet
 int cache_find(char *uri) {
-	pthread_mutex_lock(&mutex);
 	int i;
 	for(i = 0; i < 5; i++) {
-		if(list[i] != NULL) {
+		if(list[i]->cached) {
 			if(!strcmp(list[i]->uri,uri)) {
 				list[i]->time = ++global_time;
 				return i;
@@ -20,11 +24,11 @@ int cache_find(char *uri) {
 		}
 	}
 	return -1;
-	pthread_mutex_unlock(&mutex);
 }
 
 // Returns the index that data was added at.
 int cache_add(char *data, int size, char *uri) {
+	pthread_mutex_lock(&mutex);
 	int i;
 	if((i = cache_find(uri)) >= 0)
 		return i;
@@ -34,10 +38,9 @@ int cache_add(char *data, int size, char *uri) {
 		return -1;
 	}
 
-	pthread_mutex_lock(&mutex);
-	printf("we made it boss\n");
+	
 	// Nothing in list yet, so add as first element
-	if(list[0] == NULL) {
+	if(list[0]->cached) {
 		list[0] = malloc(sizeof(struct node));
 		list[0]->time = ++global_time;
 		list[0]->content_size = size;
@@ -50,7 +53,7 @@ int cache_add(char *data, int size, char *uri) {
 	int last_index = 0;
 	for(i = 0; i < 5; i++) {
 		// Keep trying to find last used index
-		if(list[i] != NULL) {
+		if(list[i]->cached) {
 			if(list[i]->time > list[last_index]->time)
 				last_index = i;
 		}
@@ -64,7 +67,7 @@ int cache_add(char *data, int size, char *uri) {
 	total_size += size;
 
 	// Empty slot in cache!
-	if(list[last_index] == NULL)
+	if(list[last_index]->cached)
 		list[last_index] = malloc(sizeof(struct node));
 
 	else
@@ -75,6 +78,7 @@ int cache_add(char *data, int size, char *uri) {
 	list[last_index]->content_size = size;
 	strcpy(list[last_index]->uri, uri);
 	strcpy(list[last_index]->content, data);
+	list[last_index]->cached = 1;
 	pthread_mutex_unlock(&mutex);
 	return last_index;
 }
@@ -82,11 +86,10 @@ int cache_add(char *data, int size, char *uri) {
 void cache_destroy() {
 	int i;
 	for(i = 0; i < 5; i++) {
-		if(list[i] != NULL) {
+		if(list[i]->cached) {
 			free(list[i]);
 		}
 	}
-	free(list);
 }
 
 
