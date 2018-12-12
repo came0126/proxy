@@ -76,7 +76,9 @@ void *main_thread(void *varg) {
 	pthread_detach(pthread_self());
 	free(varg);
 	// Parse and forward the requests
+	//pthread_mutex_lock(&mutex);
 	parse(cfd);
+	//pthread_mutex_unlock(&mutex);
 	close(cfd);
 	return NULL;
 }
@@ -154,17 +156,19 @@ int foward_request(rio_t *rp, char *nohttp_url) {
 	else
 		strcpy(nohttp_url, leftover);
 
-	// Send content to client if it has been cached, or keep going
-	struct node *node = cache_find(nohttp_url);
+	int i = cache_find(nohttp_url);
 	// Request is already cached, so return and write
-	if(node != NULL) {
-		char *buf = node->content;
-		if(rio_writen(rp->rio_fd, buf, node->content_size) < 0){
-			perror("error sending cached contents to client");
-			return -1;
+	if(i >= 0) {
+		// Request from server if index is null
+		if(list[i] != NULL) {
+			char *buf = list[i]->content;
+			if(rio_writen(rp->rio_fd, buf, list[i]->content_size) < 0) {
+				perror("error sending cached contents to client");
+				return -1;
+			}
+			printf("Successfully sent cached contents to client!\n");
+			return 0;
 		}
-		printf("Successfully sent cached contents to client!\n");
-		return 0;
 	}
 	
 	// Erase the request string
@@ -271,10 +275,9 @@ int foward_response(rio_t *rp, int cfd, char *nohttp_url) {
 
 	printf("Response forwarded\n");
 	printf("Caching data...\n");
-
 	cache_add(content, content_size, nohttp_url);
-
 	printf("Caching completed!\n");
+
 	return 0;
 }
 
