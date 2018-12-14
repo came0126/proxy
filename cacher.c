@@ -1,12 +1,7 @@
 #include "cacher.h"
 
+// Init global variables
 void cache_init() {
-	int i;
-	for(i = 0; i < 5; i++) {
-		list[i] = malloc(sizeof(struct node));
-		list[i]->cached = 0;
-	}
-	
 	total_size = 0;
 	global_time = 0;
 }
@@ -16,7 +11,7 @@ void cache_init() {
 int cache_find(char *uri) {
 	int i;
 	for(i = 0; i < 5; i++) {
-		if(list[i]->cached) {
+		if(list[i] != NULL) {
 			if(!strcmp(list[i]->uri,uri)) {
 				list[i]->time = ++global_time;
 				return i;
@@ -26,9 +21,9 @@ int cache_find(char *uri) {
 	return -1;
 }
 
-// Returns the index that data was added at.
+// Returns the index that data was added at. Remove by LRU policy
 int cache_add(char *data, int size, char *uri) {
-	pthread_mutex_lock(&mutex);
+	
 	int i;
 	if((i = cache_find(uri)) >= 0)
 		return i;
@@ -38,22 +33,23 @@ int cache_add(char *data, int size, char *uri) {
 		return -1;
 	}
 
-	
-	// Nothing in list yet, so add as first element
-	if(list[0]->cached) {
-		list[0] = malloc(sizeof(struct node));
-		list[0]->time = ++global_time;
-		list[0]->content_size = size;
-		strcpy(list[0]->uri, uri);
-		strcpy(list[0]->content, data);
-		total_size += size;
-	}
+	pthread_mutex_lock(&mutex);
+
+	// // Nothing in list yet, so add as first element
+	// if(list[0] != NULL) {
+	// 	list[0] = malloc(sizeof(struct node));
+	// 	list[0]->time = ++global_time;
+	// 	list[0]->content_size = size;
+	// 	strcpy(list[0]->uri, uri);
+	// 	strcpy(list[0]->content, data);
+	// 	total_size += size;
+	// }
 
 	// Find the last recently used index
 	int last_index = 0;
 	for(i = 0; i < 5; i++) {
 		// Keep trying to find last used index
-		if(list[i]->cached) {
+		if(list[i] != NULL) {
 			if(list[i]->time > list[last_index]->time)
 				last_index = i;
 		}
@@ -67,7 +63,7 @@ int cache_add(char *data, int size, char *uri) {
 	total_size += size;
 
 	// Empty slot in cache!
-	if(list[last_index]->cached)
+	if(list[last_index] == NULL)
 		list[last_index] = malloc(sizeof(struct node));
 
 	else
@@ -78,24 +74,17 @@ int cache_add(char *data, int size, char *uri) {
 	list[last_index]->content_size = size;
 	strcpy(list[last_index]->uri, uri);
 	strcpy(list[last_index]->content, data);
-	list[last_index]->cached = 1;
+
 	pthread_mutex_unlock(&mutex);
 	return last_index;
 }
 
+// Free the cache
 void cache_destroy() {
 	int i;
 	for(i = 0; i < 5; i++) {
-		if(list[i]->cached) {
+		if(list[i] != NULL) {
 			free(list[i]);
 		}
 	}
 }
-
-
-
-
-
-
-
-

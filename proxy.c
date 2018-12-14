@@ -14,16 +14,10 @@ Christian Cameron
 #include "csapp.h"
 #include "cacher.h"
 
-/* Recommended max cache and object sizes */
-// #define MAX_CACHE_SIZE 1049000
-// #define MAX_OBJECT_SIZE 102400
-
 void *main_thread(void *varg);
 void parse(int cfd);
 int foward_request(rio_t *rp, char *nohttp_url);
 int foward_response(rio_t *rp, int cfd, char *nohttp_url);
-int write_cache(int cfd, char *uri);
-char *uri_to_fd(char *uri);
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:56.0) Gecko/20100101 Firefox/56.0\r\n";
@@ -78,9 +72,7 @@ void *main_thread(void *varg) {
 	pthread_detach(pthread_self());
 	free(varg);
 	// Parse and forward the requests
-	//pthread_mutex_lock(&mutex);
 	parse(cfd);
-	//pthread_mutex_unlock(&mutex);
 	close(cfd);
 	return NULL;
 }
@@ -101,8 +93,6 @@ void parse(int cfd) {
 	rio_readinitb(&rp, cfd);
 	if((sfd = foward_request(&rp, nohttp_url)) < 0)
 		return;
-
-	printf("we made it boss\n");
 	
 	// Handle response from server
 	rio_readinitb(&rp, sfd);
@@ -159,19 +149,6 @@ int foward_request(rio_t *rp, char *nohttp_url) {
 
 	else
 		strcpy(nohttp_url, leftover);
-
-	int i = cache_find(nohttp_url);
-	// Request is already cached, so return and write
-	if(i >= 0) {
-		char *buf = list[i]->content;
-		printf("buf: %s\n", buf);
-		if(rio_writen(rp->rio_fd, buf, list[i]->content_size) < 0) {
-			perror("error sending cached contents to client");
-			return -1;
-		}
-		printf("Successfully sent cached contents to client!\n");
-		return 0;
-	}
 	
 	// Erase the request string
 	strcpy(request, "");
@@ -202,6 +179,19 @@ int foward_request(rio_t *rp, char *nohttp_url) {
 			strcat(request, line);
 	}
 
+	// See if request is cached
+	int i = cache_find(nohttp_url);
+	// Request is already cached, so return and write
+	if(i >= 0) {
+		char *buf = list[i]->content;
+		if(rio_writen(rp->rio_fd, buf, list[i]->content_size) < 0) {
+			perror("error sending cached contents to client");
+			return -1;
+		}
+		printf("Successfully sent cached contents to client!\n");
+		return 0;
+	}
+
 	// Client did not send a custom host, so use default
 	if(!flag) {
 		sprintf(line, "Host: %s\r\n", host);
@@ -213,11 +203,6 @@ int foward_request(rio_t *rp, char *nohttp_url) {
 	strcat(request, prox_conn);
 	strcat(request, conn);
 	strcat(request, "\r\n");
-
-	printf("host: %s\n", host);
-	printf("port: %s\n", port);
-	printf("path: %s\n", path);
-	printf("%s", request);
 
 	// Open the server connection
 	int sfd = open_clientfd(host, port);
@@ -282,50 +267,3 @@ int foward_response(rio_t *rp, int cfd, char *nohttp_url) {
 
 	return 0;
 }
-
-// If url is cached, write the contents to client then return > 0
-// If a request from server is needed then return 0, on write error return -1.
-int write_cache(int cfd, char *uri) {
-	// rio_t cache;
-	// int fd = open(uri, O_RDONLY, 0777);
-	// rio_readinitb(&cache, int fd); 
-
-	// // Site wasnt cached, so let caller move forward with requesting from the server.
-	// if(cache_fd == NULL) {
-	// 	perror("Cache miss... \n");
-	// 	close(fd);
-	// 	return 0;
-	// }
-
-	// printf("\n\n\n***i got catched\n\n\n");
-	// char buf[MAX_CACHE_SIZE];
-	// // Read the file
-	// int buf_size = rio_readnb(&cache, buf, MAX_CACHE_SIZE); 
-	// if(buf_size < 0) {
-	// 	perror("IO Error when caching, trying server...\n");
-	// 	close(fd);
-	// 	return 0;
-	// }
-
-	// close(fd);
-
-	// // Send buffer to client
-	// if(rio_writen(cfd, buf, buf_size) < 0) {
-	// 	perror("error writing content from cache to client\n");
-	// 	return -1;
-	// }
-
-	// return 1; // Success!
-	return 0;
-}
-
-// // Simple function to convert uri to a valid file name
-// char *uri_to_fd(char *uri) {
-// 	int i;
-// 	for(i = 0; uri[i] != '\0'; i++) {
-// 		if(uri[i] == '/')
-// 			uri[i] = '_';
-// 	}
-
-// 	return uri;
-// }
